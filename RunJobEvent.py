@@ -18,6 +18,7 @@ import atexit
 import signal
 import commands
 import traceback
+import uuid
 from optparse import OptionParser
 from json import loads, dump
 from shutil import copy2
@@ -3333,9 +3334,11 @@ class RunJobEvent(RunJob):
             self.stopMessageThreadPrefetcher()
             self.joinMessageThreadPrefetcher()
         if tokenExtractorProcess:
-            tokenExtractorProcess.kill()
+            # tokenExtractorProcess.kill()
+            os.killpg(os.getpgid(tokenExtractorProcess.pid), signal.SIGTERM)
         if prefetcherProcess:
-            prefetcherProcess.kill()
+            # prefetcherProcess.kill()
+            os.killpg(os.getpgid(prefetcherProcess.pid), signal.SIGTERM)
 
         # Close stdout/err streams
         if tokenextractor_stdout:
@@ -3352,7 +3355,8 @@ class RunJobEvent(RunJob):
         """ Stop Prefetcher thread and close output steams """
 
         if prefetcherProcess:
-            prefetcherProcess.kill()
+            os.killpg(os.getpgid(prefetcherProcess.pid), signal.SIGTERM)
+            # prefetcherProcess.kill()
 
         # Close stdout/err streams
         if prefetcher_stdout:
@@ -4026,8 +4030,13 @@ if __name__ == "__main__":
                                             tolog("Prefetcher has not replied for %d seconds - restarting it" % maxCount)
                                             # Stop Prefetcher
                                             runJob.stopPrefetcher(prefetcherProcess, prefetcher_stdout, prefetcher_stderr)
-                                            prefetcher_stdout, prefetcher_stderr = runJob.getStdoutStderrFileObjects(stdoutName="prefetcher_stdout_%s.txt" % prefetcherAttempts,
-                                                                                                                     stderrName="prefetcher_stderr_%s.txt" % prefetcherAttempts)
+                                            # Create new message server for new Prefetcher
+                                            prefetcherUuid = uuid.uuid4()
+                                            runJob.setYamplChannelNamePrefetcher("EventService_Prefetcher-%s" % (prefetcherUuid))
+                                            runJob.createMessageServer(prefetcher=True)
+                                            # Start new Prefetcher process
+                                            prefetcher_stdout, prefetcher_stderr = runJob.getStdoutStderrFileObjects(stdoutName="prefetcher_stdout_%s.txt" % prefetcherUuid,
+                                                                                                                     stderrName="prefetcher_stderr_%s.txt" % prefetcherUuid)
                                             prefetcherProcess = runJob.getPrefetcherProcess(thisExperiment, setupString, input_file=input_file, stdout=prefetcher_stdout, stderr=prefetcher_stderr)
                                             prefetcherAttempts += 1
                                             runJob.setPrefetcherIsReady(False)
@@ -4133,7 +4142,9 @@ if __name__ == "__main__":
                             break
                         if w * nap > max_wait * 60:
                             tolog("AthanaMP has been stuck for %s minutes, will kill AthenaMP" % max_wait)
-                            athenaMPProcess.kill()
+                            # athenaMPProcess.kill()
+                            os.killpg(os.getpgid(athenaMPProcess.pid), signal.SIGTERM)
+
                             job.pilotErrorDiag = "AthenaMP has been stuck for %s minutes" % max_wait
                             job.result[0] = "failed"
                             job.result[2] = error.ERR_ESATHENAMPDIED
@@ -4236,7 +4247,9 @@ if __name__ == "__main__":
         kill = False
         tolog("Will now wait for AthenaMP to finish")
         if runJob.shouldBeKilled():
-            athenaMPProcess.kill()
+            # athenaMPProcess.kill()
+            os.killpg(os.getpgid(athenaMPProcess.pid), signal.SIGTERM)
+
             tolog("(Kill signal SIGTERM sent to AthenaMP - jobReport might get lost)")
             job.pilotErrorDiag = "Pilot was instructed by server to kill AthenaMP"
             job.result[0] = "failed"
@@ -4250,12 +4263,16 @@ if __name__ == "__main__":
                 if i > max_wait:
                     # Stop AthenaMP
                     tolog("Waited long enough - Stopping AthenaMP process")
-                    athenaMPProcess.kill()
+                    # athenaMPProcess.kill()
+                    os.killpg(os.getpgid(athenaMPProcess.pid), signal.SIGTERM)
+
                     tolog("(Kill signal SIGTERM sent to AthenaMP - jobReport might get lost)")
                     kill = True
                     break
                 if runJob.shouldBeKilled():
-                    athenaMPProcess.kill()
+                    # athenaMPProcess.kill()
+                    os.killpg(os.getpgid(athenaMPProcess.pid), signal.SIGTERM)
+
                     tolog("(Kill signal SIGTERM sent to AthenaMP - jobReport might get lost)")
                     job.pilotErrorDiag = "Pilot was instructed by server to kill AthenaMP"
                     job.result[0] = "failed"
@@ -4370,7 +4387,8 @@ if __name__ == "__main__":
 
         if prefetcherProcess:
             tolog("Killing Prefetcher process")
-            prefetcherProcess.kill()
+            # prefetcherProcess.kill()
+            os.killpg(os.getpgid(prefetcherProcess.pid), signal.SIGTERM)
 
         tolog("Stopping stage-out thread")
         runJob.stopAsyncOutputStagerThread()

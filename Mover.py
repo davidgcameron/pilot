@@ -346,8 +346,8 @@ def get_data_new(job,
         files[fspec.guid] = pfn or ''
         lfns.append(fspec.lfn)
 
-    createPoolFileCatalog(files, lfns, pfc_name, forceLogical=True)
-    #createPoolFileCatalog(files, lfns, pfc_name, overrideLogical=True)
+    createPoolFileCatalog(files, lfns, pfc_name)
+    # createPoolFileCatalog(files, lfns, pfc_name, forceLogical=True)
 
     return 0, "", None, FAX_dictionary
 
@@ -844,7 +844,9 @@ def getFileInfoFromXML(thisfile):
     """ Get the PFN from the XML """
 
     pfn = thisfile.getElementsByTagName("pfn")[0].getAttribute("name")
-    lfn = thisfile.getElementsByTagName("lfn")[0].getAttribute("name")
+    # lfn will not be present in XML any longer, get it from the PFN - possible problem with LFN file name extensions
+    # lfn = thisfile.getElementsByTagName("lfn")[0].getAttribute("name")
+    lfn = os.path.basename(pfn)
     guid = thisfile.getAttribute("ID")
 
     return lfn, pfn, guid
@@ -1655,7 +1657,8 @@ def createPFC4TURLs(fileInfoDic, pfc_name, sitemover, sitename, dsdict, tokens_d
 
         if turlFileInfoDic != {}:
             # create a TURL based PFC
-            xml_from_PFC = createPoolFileCatalog(turlFileInfoDic, lfns, pfc_name=pfc_name, forceLogical=True)
+            xml_from_PFC = createPoolFileCatalog(turlFileInfoDic, lfns, pfc_name=pfc_name)
+            # xml_from_PFC = createPoolFileCatalog(turlFileInfoDic, lfns, pfc_name=pfc_name, forceLogical=True)
             if xml_from_PFC == "":
                 pilotErrorDiag = "PFC creation failed"
                 ec = error.ERR_LCGGETTURLS
@@ -4550,9 +4553,11 @@ def getPoolFileCatalogND(guids, lfns, pinitdir, pfc_name=None):
 
         # create a pool file catalog
         if pfc_name:
-            xml_from_PFC = createPoolFileCatalog(file_dic, lfns, forceLogical=True, pfc_name=pfc_name)
+            xml_from_PFC = createPoolFileCatalog(file_dic, lfns, pfc_name=pfc_name)
+            # xml_from_PFC = createPoolFileCatalog(file_dic, lfns, forceLogical=True, pfc_name=pfc_name)
         else:
-            xml_from_PFC = createPoolFileCatalog(file_dic, lfns, forceLogical=True)
+            xml_from_PFC = createPoolFileCatalog(file_dic, lfns)
+            # xml_from_PFC = createPoolFileCatalog(file_dic, lfns, forceLogical=True)
     else:
         pilotErrorDiag = "Guids were not provided by server"
         tolog("!!FAILED!!2999!! %s" % (pilotErrorDiag))

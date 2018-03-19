@@ -257,6 +257,7 @@ class JobMover(object):
                 if not location:
                     raise Exception("Failed to get client location")
                 query.update(sort='geoip', client_location=location)
+                # query.update(sort='geoip', client_location=location, domain='lan') # remove lan again after testing
 
             try:
                 self.log('Call rucio.list_replicas() with query=%s' % query)
