@@ -1,6 +1,7 @@
 # This module contains functions related to file handling.
 
 import os
+from commands import getoutput
 
 from pUtil import tolog, convert, readpar
 
@@ -158,37 +159,6 @@ def writeFile(filename, contents, mode='w'):
         f.close()
 
     return status
-
-def tail(f, lines=10):
-    """ Get the n last lines from file f """
-
-    if lines == 0:
-        return ""
-
-    BUFSIZ = 1024
-    f.seek(0, 2)
-    bytes = f.tell()
-    size = lines + 1
-    block = -1
-    data = []
-    while size > 0 and bytes > 0:
-        if bytes - BUFSIZ > 0:
-            # Seek back one whole BUFSIZ
-            f.seek(block * BUFSIZ, 2)
-            # read BUFFER
-            data.insert(0, f.read(BUFSIZ))
-        else:
-            # file too small, start from begining
-            f.seek(0,0)
-            # only read what was not read
-            data.insert(0, f.read(bytes))
-        linesFound = data[0].count('\n')
-        size -= linesFound
-        bytes -= BUFSIZ
-        block -= 1
-
-    tail_list = ''.join(data).splitlines()[-lines:]
-    return '\n'.join(tail_list)
 
 def getTracingReportFilename():
     """ Return the name of the tracing report JSON file """
@@ -690,7 +660,7 @@ def getDirSize(d):
 
     # E.g., size_str = "900\t/scratch-local/nilsson/pilot3z"
     try:
-       # Remove tab and path, and convert to int (and B)
+        # Remove tab and path, and convert to int (and B)
         size = int(size_str.split("\t")[0])*1024
     except Exception, e:
         tolog("!!WARNING!!4343!! Failed to convert to int: %s" % (e))
@@ -893,7 +863,7 @@ def getCPUTimes(workDir):
     # Note: this is used with Event Service jobs
 
     # Input:  workDir (location of jobReport.json)
-    # Output: cpuCU (unit), totalCPUTime, conversionFactor (output consistent with pUtil::setTimeConsumed())
+    # Output: cpuCU (unit), totalCPUTime, conversionFactor
 
     totalCPUTime = 0L
 
@@ -1007,3 +977,54 @@ def touch(path):
 
     with open(path, 'a'):
         os.utime(path, None)
+
+def getOsTimesTuple(workdir):
+    """ Read os.times() from a txt file and convert it back to a proper os.times() tuple again """
+    # This function is used to calculate the cpu consumption time. The t0_times.txt file is created just before the
+    # payload is executed in
+
+    times = []
+    failed = False
+    path = os.path.join(workdir, 't0_times.txt')
+
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            for t in f.read().split():
+                # remove any initial (, trailing ) or ,
+                a = t.strip('(').strip(')').strip(',')
+                try:
+                    times.append(float(a))
+                except ValueError as e:
+                    tolog("!!WARNING!!1212!! Exception caught: offending value=%s (cannot convert to float)" % (e))
+                    failed = True
+                    break
+
+            if not failed:
+                # consistency check
+                if len(times) == 5:
+                    return tuple(times)
+                else:
+                    tolog("!!WARNING!!1222!! os.times() tuple has wrong length (not 5): %s" % str(times))
+            else:
+                tolog("!!WARNING!!1222!! Failed to convert os.times() txt file to tuple - CPU consumption meausurement cannot be done")
+                return None
+    else:
+        tolog("t0 file does not exist - probably the payload was not executed")
+
+    return None
+
+def get_files(pattern="*.log"):
+
+    files = []
+    stdout = getoutput("find . -name %s" % pattern)
+    if stdout:
+        # remove last \n if present
+        if stdout.endswith('\n'):
+            stdout = stdout[:-1]
+        files = stdout.split('\n')
+
+    return files
+
+def tail(filename, lines=10):
+
+    return getoutput('tail -%d %s' % (lines, filename))

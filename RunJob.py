@@ -13,7 +13,6 @@
 import os, sys, commands, time
 import traceback
 import atexit, signal
-import stat
 from optparse import OptionParser
 from json import loads
 
@@ -21,14 +20,15 @@ from json import loads
 import Site, pUtil, Job, Node, RunJobUtilities
 import Mover as mover
 from pUtil import tolog, readpar, createLockFile, getDatasetDict, getSiteInformation,\
-     tailPilotErrorDiag, getCmtconfig, getExperiment, getGUID
+     tailPilotErrorDiag, getCmtconfig, getExperiment, getGUID, getWriteToInputFilenames
 from JobRecovery import JobRecovery
 from FileStateClient import updateFileStates, dumpFileStates
 from ErrorDiagnosis import ErrorDiagnosis # import here to avoid issues seen at BU with missing module
 from PilotErrors import PilotErrors
 from shutil import copy2
-from FileHandling import tail, getExtension, extractOutputFiles, getDestinationDBlockItems, getDirectAccess
+from FileHandling import tail, getExtension, extractOutputFiles, getDestinationDBlockItems, getDirectAccess, writeFile, readFile
 from EventRanges import downloadEventRanges
+from processes import get_cpu_consumption_time
 
 # remove logguid, debuglevel - not needed
 # relabelled -h, queuename to -b (debuglevel not used)
@@ -840,20 +840,55 @@ class RunJob(object):
 
         return directIn
 
-    def replaceLFNsWithTURLs(self, cmd, fname, inFiles):
+    def replaceLFNsWithTURLs(self, cmd, fname, inFiles, workdir, writetofile=""):
         """
         Replace all LFNs with full TURLs.
         This function is used with direct access. Athena requires a full TURL instead of LFN.
         """
 
+        tolog("inside replaceLFNsWithTURLs()")
+        turl_dictionary = {}  # { LFN: TURL, ..}
         if os.path.exists(fname):
             file_info_dictionary = mover.getFileInfoDictionaryFromXML(fname)
+            tolog("file_info_dictionary=%s" % file_info_dictionary)
             for inputFile in inFiles:
-                if inputFile in cmd:
+                if inputFile in file_info_dictionary:
                     turl = file_info_dictionary[inputFile][0]
-                    if turl.startswith('root://') and turl not in cmd:
-                        cmd = cmd.replace(inputFile, turl)
-                        tolog("Replaced '%s' with '%s' in the run command" % (inputFile, turl))
+                    turl_dictionary[inputFile] = turl
+                    if inputFile in cmd:
+                        if turl.startswith('root://') and turl not in cmd:
+                            cmd = cmd.replace(inputFile, turl)
+                            tolog("Replaced '%s' with '%s' in the run command" % (inputFile, turl))
+                else:
+                    tolog("!!WARNING!!3434!! inputFile=%s not in dictionary=%s" % (inputFile, file_info_dictionary))
+
+            tolog("writetofile=%s" % writetofile)
+            tolog("turl_dictionary=%s" % turl_dictionary)
+            # replace the LFNs with TURLs in the writeToFile input file list (if it exists)
+            if writetofile and turl_dictionary:
+                filenames = getWriteToInputFilenames(writetofile)
+                tolog("filenames=%s" % filenames)
+                for fname in filenames:
+                    new_lines = []
+                    path = os.path.join(workdir, fname)
+                    if os.path.exists(path):
+                        f = readFile(path)
+                        tolog("readFile=%s" % f)
+                        for line in f.split('\n'):
+                            fname = os.path.basename(line)
+                            if fname in turl_dictionary:
+                                turl = turl_dictionary[fname]
+                                new_lines.append(turl)
+                            else:
+                                if line:
+                                    new_lines.append(line)
+
+                        lines = '\n'.join(new_lines)
+                        if lines:
+                            writeFile(path, lines)
+                            tolog("lines=%s" % lines)
+                    else:
+                        tolog("!!WARNING!!4546!! File does not exist: %s" % path)
         else:
             tolog("!!WARNING!!4545!! Could not find file: %s (cannot locate TURLs for direct access)" % fname)
 
@@ -898,7 +933,12 @@ class RunJob(object):
 
         # Run the payload process, which could take days to finish
         t0 = os.times()
-        tolog("t0 = %s" % str(t0))
+        path = os.path.join(job.workdir, 't0_times.txt')
+        if writeFile(path, str(t0)):
+            tolog("Wrote %s to file %s" % (str(t0), path))
+        else:
+            tolog("!!WARNING!!3344!! Failed to write t0 to file, will not be able to calculate CPU consumption time on the fly")
+
         res_tuple = (0, 'Undefined')
 
         multi_trf = self.isMultiTrf(runCommandList)
@@ -931,19 +971,32 @@ class RunJob(object):
                 try:
                     analysisJob = job.isAnalysisJob()
                     directIn = self.isDirectAccess(analysisJob, transferType=job.transferType)
+                    tolog("analysisJob=%s" % analysisJob)
+                    tolog("directIn=%s" % directIn)
                     if not analysisJob and directIn:
+                        # replace the LFNs with TURLs in the job command
+                        # (and update the writeToFile input file list if it exists)
                         _fname = os.path.join(job.workdir, "PoolFileCatalog.xml")
-                        cmd = self.replaceLFNsWithTURLs(cmd, _fname, job.inFiles)
+                        cmd = self.replaceLFNsWithTURLs(cmd, _fname, job.inFiles, job.workdir, writetofile=job.writetofile)
+
                 except Exception, e:
                     tolog("Caught exception: %s" % e)
 
                 tolog("Executing job command %d/%d" % (current_job_number, number_of_jobs))
 
+                # Hack to replace Archive_tf
+                # if job.trf == 'Archive_tf.py' or job.trf == 'Dummy_tf.py':
+                #     cmd = 'sleep 1'
+                #     tolog('Will execute a dummy sleep command instead of %s' % job.trf)
 
                 # Start the subprocess
                 main_subprocess = self.getSubprocess(thisExperiment, cmd, stdout=file_stdout, stderr=file_stderr)
 
                 if main_subprocess:
+
+                    path = os.path.join(job.workdir, 'cpid.txt')
+                    if writeFile(path, str(main_subprocess.pid)):
+                        tolog("Wrote cpid=%s to file %s" % (main_subprocess.pid, path))
                     time.sleep(2)
 
                     # Start the utility if required
@@ -1030,9 +1083,11 @@ class RunJob(object):
                     break
 
         t1 = os.times()
-        tolog("t1 = %s" % str(t1))
-        t = map(lambda x, y:x-y, t1, t0) # get the time consumed
-        job.cpuConsumptionUnit, job.cpuConsumptionTime, job.cpuConversionFactor = pUtil.setTimeConsumed(t)
+        cpuconsumptiontime = get_cpu_consumption_time(t0)
+        job.cpuConsumptionTime = int(cpuconsumptiontime)
+        job.cpuConsumptionUnit = 's'
+        job.cpuConversionFactor = 1.0
+
         tolog("Job CPU usage: %s %s" % (job.cpuConsumptionTime, job.cpuConsumptionUnit))
         tolog("Job CPU conversion factor: %1.10f" % (job.cpuConversionFactor))
         job.timeExe = int(round(t1[4] - t0[4]))
@@ -1176,7 +1231,19 @@ class RunJob(object):
 
         return ec, job, outputFileInfo
 
-    def getDatasets(self, job):
+    def isArchive(self, zipmap):
+        """
+        Is the archive zipmap populated?
+        """
+
+        if zipmap:
+            archive = True
+        else:
+            archive = False
+
+        return archive
+
+    def getDatasets(self, job, zipmap=None):
         """ get the datasets for the output files """
 
         # get the default dataset
@@ -1187,7 +1254,8 @@ class RunJob(object):
 
         # create the dataset dictionary
         # (if None, the dsname above will be used for all output files)
-        datasetDict = getDatasetDict(job.outFiles, job.destinationDblock, job.logFile, job.logDblock)
+        archive = self.isArchive(zipmap)
+        datasetDict = getDatasetDict(job.outFiles, job.destinationDblock, job.logFile, job.logDblock, archive=archive)
         if datasetDict:
             tolog("Dataset dictionary has been verified")
         else:
@@ -1222,7 +1290,7 @@ class RunJob(object):
 
         try:
             t0 = os.times()
-            rc, job.pilotErrorDiag, rf, _dummy, job.filesNormalStageOut, job.filesAltStageOut = mover.put_data_new(job, jobSite, stageoutTries=self.__stageoutretry, log_transfer=False)
+            rc, job.pilotErrorDiag, rf, _dummy, job.filesNormalStageOut, job.filesAltStageOut = mover.put_data_new(job, jobSite, stageoutTries=self.__stageoutretry, log_transfer=False, pinitdir=self.__pilot_initdir)
             t1 = os.times()
 
             job.timeStageOut = int(round(t1[4] - t0[4]))
@@ -1587,7 +1655,7 @@ class RunJob(object):
             for archive in zip_map.keys():
                 tolog("Creating zip archive %s for files %s" % (archive, zip_map[archive]))
                 fname = os.path.join(workdir, archive)
-                zf = zipfile.ZipFile(fname, mode='w', compression=zipfile.ZIP_STORED) # zero compression
+                zf = zipfile.ZipFile(fname, mode='w', compression=zipfile.ZIP_STORED, allowZip64=True) # zero compression
                 for content_file in zip_map[archive]:
                     try:
                         tolog("Adding %s to archive .." % (content_file))
@@ -1599,7 +1667,8 @@ class RunJob(object):
                 if zf:
                     zf.close()
             os.chdir(cwd)
-            archive_names = zip_map.keys()
+            if zip_map:
+                archive_names = zip_map.keys()
 
         return zip_map, archive_names
 
@@ -1867,10 +1936,6 @@ if __name__ == "__main__":
         # execute the payload
         res, job, getstatusoutput_was_interrupted, current_job_number = runJob.executePayload(thisExperiment, runCommandList, job)
 
-        # if payload leaves the input files, delete them explicitly
-        if ins:
-            ec = pUtil.removeFiles(job.workdir, ins)
-
         # payload error handling
         ed = ErrorDiagnosis()
         job = ed.interpretPayload(job, res, getstatusoutput_was_interrupted, current_job_number, runCommandList, runJob.getFailureCode())
@@ -1889,10 +1954,20 @@ if __name__ == "__main__":
         job, fromJSON = runJob.handleAdditionalOutFiles(job, analysisJob)
 
         # should any output be zipped? if so, the zipmapString was previously set (otherwise the returned variables are set to None)
-        zip_map, archive_names = runJob.createArchives(job.outFiles, zipmapString, job.workdir)
+        # zip_map, archive_names = runJob.createArchives(job.outFiles, zipmapString, job.workdir)
+        zip_map = None
         if zip_map:
             # Add the zip archives to the output file lists
-            job.outFiles, job.destinationDblock, job.destinationDBlockToken, job.scopeOut = job.addArchivesToOutput(zip_map, job.outFiles, job.destinationDblock, job.destinationDBlockToken, job.scopeOut)
+            job.outFiles, job.destinationDblock, job.destinationDBlockToken, job.scopeOut = job.addArchivesToOutput(zip_map,
+                                                                                                                    job.inFiles,
+                                                                                                                    job.outFiles,
+                                                                                                                    job.dispatchDblock,
+                                                                                                                    job.destinationDblock,
+                                                                                                                    job.dispatchDBlockToken,
+                                                                                                                    job.destinationDBlockToken,
+                                                                                                                    job.scopeIn,
+                                                                                                                    job.scopeOut)
+            #job.outFiles, job.destinationDblock, job.destinationDBlockToken, job.scopeOut = job.addArchivesToOutput(zip_map, job.outFiles, job.destinationDblock, job.destinationDBlockToken, job.scopeOut)
 
         # verify and prepare and the output files for transfer
         ec, pilotErrorDiag, outs, outsDict = RunJobUtilities.prepareOutFiles(job.outFiles, job.logFile, job.workdir)
@@ -1902,6 +1977,10 @@ if __name__ == "__main__":
         tolog("outs=%s"%str(outs))
         tolog("outsDict=%s"%str(outsDict))
 
+        # if payload leaves the input files, delete them explicitly
+        if ins and not zip_map:
+            ec = pUtil.removeFiles(job.workdir, ins)
+
         # update the current file states
         updateFileStates(outs, runJob.getParentWorkDir(), job.jobId, mode="file_state", state="created")
         dumpFileStates(runJob.getParentWorkDir(), job.jobId)
@@ -1910,7 +1989,7 @@ if __name__ == "__main__":
         outputFileInfo = {}
         if outs or (job.logFile and job.logFile != ''):
             # get the datasets for the output files
-            dsname, datasetDict = runJob.getDatasets(job)
+            dsname, datasetDict = runJob.getDatasets(job, zipmap=zip_map)
 
             tolog("datasetDict=%s"%str(datasetDict))
 
@@ -1922,15 +2001,30 @@ if __name__ == "__main__":
                 runJob.moveTrfMetadata(job.workdir, job.jobId)
 
             # create the metadata for the output + log files
-            ec, job, outputFileInfo = runJob.createFileMetadata(list(outs), job, outsDict, dsname, datasetDict, jobSite.sitename, analysisJob=analysisJob, fromJSON=fromJSON)
+            ec = 0
+            try:
+                ec, job, outputFileInfo = runJob.createFileMetadata(list(outs), job, outsDict, dsname, datasetDict, jobSite.sitename, analysisJob=analysisJob, fromJSON=fromJSON)
+            except Exception as e:
+                job.pilotErrorDiag = "Exception caught: %s" % e
+                tolog(job.pilotErrorDiag)
+                ec = error.ERR_BADXML
+                job.result[0] = "Badly formed XML (PoolFileCatalog.xml could not be parsed)"
+                job.result[2] = ec
             if ec:
                 runJob.failJob(0, ec, job, pilotErrorDiag=job.pilotErrorDiag)
 
             tolog("outputFileInfo=%s"%str(outputFileInfo))
 
             # in case the output files have been zipped, it is now safe to remove them and update the outFiles list
-            if zip_map:
-                job, outs, outputFileInfo = runJob.cleanupForZip(zip_map, archive_names, job, outs, outputFileInfo, datasetDict)
+            # should only be executed if Archive_rf is skipped and pilot does all zipping
+            if zip_map and False:
+                tolog('Zip map cleanup pass #1 (skipped)')
+                # job, outs, outputFileInfo = runJob.cleanupForZip(zip_map, archive_names, job, outs, outputFileInfo, datasetDict)
+                tolog('Zip map cleanup pass #2')
+                job.outFiles, job.destinationDblock, job.destinationDBlockToken, job.scopeOut, outs = \
+                    job.removeInputFromOutputLists(job.inFiles, job.outFiles, job.destinationDblock, job.destinationDBlockToken, job.scopeOut, outs)
+                tolog('Zip map cleanup pass #3')
+                ec = pUtil.removeFiles(job.workdir, ins)
 
         # move output files from workdir to local DDM area
         finalUpdateDone = False

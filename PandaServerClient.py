@@ -758,7 +758,8 @@ class PandaServerClient:
         node['xml'] = self.getXML(job, site.sitename, site.workdir, xmlstr=xmlstr, jr=jr)
 
         # stdout tail in case job.debug == 'true'
-        if job.debug.lower() == "true" and stdout_tail != "":
+        if job.debug and type(stdout_tail) is str and len(stdout_tail) > 0:
+        #if job.debug and stdout_tail and stdout_tail != "":
             # protection for potentially large tails
             stdout_tail = stdout_tail[-2048:]
             node['stdout'] = stdout_tail
@@ -792,7 +793,7 @@ class PandaServerClient:
             else:
                 tolog("stdout_path not set")
         else:
-            if job.debug.lower() != "true":
+            if not job.debug:
                 tolog("Stdout tail will not be sent (debug=False)")
             elif stdout_tail == "":
                 tolog("Stdout tail will not be sent (no stdout tail)")
@@ -875,15 +876,18 @@ class PandaServerClient:
         # jobAtlasRelease = getAtlasRelease(job.release)
         # if payloadXMLProblem and job.trf.split(",")[-1] not in trf_exclusions and jobAtlasRelease[-1] not in release_exclusions:
         if payloadXMLProblem:
-            tolog("!!FAILED!!1300!! %s" % (pilotErrorDiag))
-            job.result[0] = "failed"
-            job.result[2] = self.__error.ERR_NOPAYLOADMETADATA
-            if node.has_key('pilotLog'):
-                node['pilotLog'] += "!!FAILED!!1300!! %s" % (pilotErrorDiag)
+            if job.trf == 'Archive_tf.py' or job.trf == 'Dummy_tf.py':
+                tolog("Metadata does not exist because the job is an archive/dummy job")
             else:
-                node['pilotLog'] = "!!FAILED!!1300!! %s" % (pilotErrorDiag)
-            node['pilotErrorCode'] = job.result[2]
-            node['state'] = job.result[0]
+                tolog("!!FAILED!!1300!! %s" % (pilotErrorDiag))
+                job.result[0] = "failed"
+                job.result[2] = self.__error.ERR_NOPAYLOADMETADATA
+                if node.has_key('pilotLog'):
+                    node['pilotLog'] += "!!FAILED!!1300!! %s" % (pilotErrorDiag)
+                else:
+                    node['pilotLog'] = "!!FAILED!!1300!! %s" % (pilotErrorDiag)
+                node['pilotErrorCode'] = job.result[2]
+                node['state'] = job.result[0]
 
         # for backward compatibility
         try:

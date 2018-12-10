@@ -620,19 +620,6 @@ def removePyModules(_dir):
                 except:
                     pass
 
-def setTimeConsumed(t_tuple):
-    """ set the system+user time spent by the job """
-
-    # The cpuConsumptionTime is the system+user time while wall time is encoded in pilotTiming, third number.
-    # Previously the cpuConsumptionTime was "corrected" with a scaling factor but this was deemed outdated and is now set to 1.
-
-    t_tot = reduce(lambda x, y:x+y, t_tuple[2:3])
-    conversionFactor = 1.0
-    cpuCU = "s" # "kSI2kseconds"
-    cpuCT = int(t_tot*conversionFactor)
-
-    return cpuCU, cpuCT, conversionFactor
-
 def timeStamp():
     """ return ISO-8601 compliant date/time format """
 
@@ -985,9 +972,7 @@ def getOutputFileInfo(outputFiles, checksum_cmd, skiplog=False, logFile=""):
         if filename == logFile and skiplog:
             ec = -1
         else:
-            tolog("Importing SiteMover")
             from SiteMover import SiteMover
-            tolog("Imported SiteMover, calling getLocalFileInfo")
             ec, pilotErrorDiag, _fsize, _checksum = SiteMover.getLocalFileInfo(filename, csumtype=checksum_cmd)
             tolog("Adding %s,%s for file %s using %s" % (_fsize, _checksum, filename, checksum_cmd))
         if ec == 0:
@@ -1213,6 +1198,11 @@ def createPoolFileCatalog(file_dictionary, lfns, pfc_name="PoolFileCatalog.xml",
 
         pfc_text += '</POOLFILECATALOG>\n'
         # tolog(str(doc.toxml()))
+
+        # add escape character for & (needed for google turls)
+        if '&' in pfc_text:
+            pfc_text = pfc_text.replace('&',  '&#038;')
+
         tolog(pfc_text)
 
         try:
@@ -2136,7 +2126,7 @@ def toPandaLogger(data):
         return 0, data, response
 
     except:
-        _type, value, traceBack = sys.exc_info()
+        _type, value, _traceback = sys.exc_info()
         tolog("ERROR : %s %s" % ( _type, traceback.format_exc()))
         return EC_Failed, None, None
 
@@ -2241,7 +2231,7 @@ def toServer(baseURL, cmd, data, path, experiment):
         else:
             return status, None, None
     except:
-        _type, value, traceBack = sys.exc_info()
+        _type, value, _traceback = sys.exc_info()
         tolog("ERROR %s : %s %s" % (cmd, _type, traceback.format_exc()))
         return EC_Failed, None, None
 
@@ -2340,7 +2330,7 @@ def writeToInputFile(path, esFileDictionary, orderedFnameList, eventservice=True
     fnames = {}
     i = 0
     for fname in esFileDictionary.keys():
-        _path = os.path.join(path, fname.replace('.pool.root.', '.txt.'))
+        _path = os.path.join(path, fname.replace('.pool.root.', '.txt.'))  # not necessary?
         try:
             f = open(_path, "w")
         except IOError, e:
@@ -2361,6 +2351,26 @@ def writeToInputFile(path, esFileDictionary, orderedFnameList, eventservice=True
         i += 1
 
     return ec, fnames
+
+def getWriteToInputFilenames(writeToFile):
+    """
+    Extract the writeToFile file name(s).
+    writeToFile='tmpin_mc16_13TeV.345935.PhPy8EG_A14_ttbarMET100_200_hdamp258p75_nonallhad.merge.AOD.e6620_e5984_s3126_r10724_r10726_tid15760866_00:AOD.15760866._000002.pool.root.1'
+    -> return 'tmpin_mc16_13TeV.345935.PhPy8EG_A14_ttbarMET100_200_hdamp258p75_nonallhad.merge.AOD.e6620_e5984_s3126_r10724_r10726_tid15760866_00'
+
+    :param writeToFile:
+    :return:
+    """
+
+    filenames = []
+    entries = writeToFile.split('^')
+    for entry in entries:
+        if ':' in entry:
+            name = entry.split(":")[0]
+            _name = name.replace('.pool.root.', '.txt.')  # not necessary?
+            filenames.append(_name)
+
+    return filenames
 
 def updateESGUIDs(guids):
     """ Update the NULL valued ES guids """
@@ -2432,6 +2442,13 @@ def updateDispatcherData4ES(data, experiment, path):
                 if name_000 in data['jobPars']:
                     tolog("%s in jobPars, replace it with %s" % (name_000, new_name))
                     data['jobPars'] = data['jobPars'].replace(name_000, new_name)
+
+            if data.has_key('eventServiceMerge') and data['eventServiceMerge'].lower() == "true":
+                eventservice = True
+            else:
+                eventservice = False
+            if not eventservice:  # note: for ES there is a different workflow; see Job.py (writeToFile)
+                ec, fnames = writeToInputFile(path, esFileDictionary, orderedFnameList, eventservice)
 
             # Remove the autoconf
             if "--autoConfiguration=everything " in data['jobPars']:
@@ -2685,7 +2702,7 @@ def dumpOrderedItems(l):
         else:
             tolog("%d. %s" % (_i, item))
 
-def getDatasetDict(outputFiles, destinationDblock, logFile, logFileDblock):
+def getDatasetDict(outputFiles, destinationDblock, logFile, logFileDblock, archive=False):
     """ Create a dataset dictionary """
 
     datasetDict = None
@@ -2704,9 +2721,11 @@ def getDatasetDict(outputFiles, destinationDblock, logFile, logFileDblock):
         for _list in _l:
             for _entry in _list:
                 if _entry == "NULL" or _entry == "" or _entry == " " or _entry == None:
-                    tolog("!!WARNING!!2999!! Found non-valid entry in list: %s" % str(_list))
-                    ok = False
-                    break
+                    # ignore if archive
+                    if not archive:
+                        tolog("!!WARNING!!2999!! Found non-valid entry in list: %s" % str(_list))
+                        ok = False
+                        break
 
         if ok:
             # build the dictionary
@@ -3296,9 +3315,6 @@ def safe_call(func, *args):
 
         exc, msg, tb = sys.exc_info()
         traceback.print_tb(tb)
-#        tb = traceback.format_tb(sys.last_traceback)
-#        for line in tb:
-#            tolog(line)
     else:
         status = True
 
@@ -3823,7 +3839,7 @@ def getStdoutDictionary(jobDic):
         jobId = jobDic[k][1].jobId
 
         # abort if not debug mode, but save an empty entry in the dictionary
-        if jobDic[k][1].debug.lower() != "true":
+        if not jobDic[k][1].debug:
             stdout_dictionary[jobId] = ""
             continue
 

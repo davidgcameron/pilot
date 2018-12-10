@@ -49,7 +49,9 @@ class JobMover(object):
     _stageout_sleeptime_min = 1*60  # seconds, min allowed sleep time in case of stageout failure
     _stageout_sleeptime_max = 5*60    # seconds, max allowed sleep time in case of stageout failure
 
-    direct_remoteinput_allowed_schemas = ['root']
+    direct_remoteinput_allowed_schemas = ['root']  ## list of allowed schemas to be used for direct acccess mode from REMOTE replicas
+    direct_input_allowed_schemas = ['root', 'davs', 'dcache', 'dcap', 'file', 'https']  ## list of allowed schemas to be used for direct acccess mode from local replicas
+
     remoteinput_allowed_schemas = ['root', 'gsiftp', 'dcap', 'davs', 'srm'] ## extend me later if need
 
 
@@ -244,7 +246,7 @@ class JobMover(object):
         ## do apply either simple query list_replicas() without geoip sort to resolve LAN replicas in case of directaccesstype=[None, LAN]
         # otherwise in case of directaccesstype=WAN mode do query geo sorted list_replicas() with location data passed
 
-        bquery = {'schemes':['srm', 'root', 'davs', 'gsiftp'],
+        bquery = {'schemes':['srm', 'root', 'davs', 'gsiftp', 'https'],
                   'dids': [dict(scope=e.scope, name=e.lfn) for e in xfiles]
                  }
 
@@ -252,12 +254,11 @@ class JobMover(object):
 
         try:
             query = bquery.copy()
-            if allowRemoteInputs:
-                location = self.detect_client_location()
-                if not location:
-                    raise Exception("Failed to get client location")
-                query.update(sort='geoip', client_location=location)
-                # query.update(sort='geoip', client_location=location, domain='lan') # remove lan again after testing
+            #if allowRemoteInputs:
+            location = self.detect_client_location()
+            if not location:
+                raise Exception("Failed to get client location")
+            query.update(sort='geoip', client_location=location)
 
             try:
                 self.log('Call rucio.list_replicas() with query=%s' % query)
@@ -285,9 +286,14 @@ class JobMover(object):
 
             fdat.replicas = [] # reset replicas list
 
+            # manually sort replicas by priority value .. can be removed once Rucio server-side fix will be delivered
+            ordered_replicas = {}
+            for pfn, xdat in sorted(r.get('pfns', {}).iteritems(), key=lambda x: x[1]['priority']):
+                ordered_replicas.setdefault(xdat.get('rse'), []).append(pfn)
+
             def get_preferred_replica(replicas, allowed_schemas):
-                for schema in allowed_schemas:
-                    for replica in replicas:
+                for replica in replicas:
+                    for schema in allowed_schemas:
                         if replica and replica.startswith('%s://' % schema):
                             return replica
                 return None
@@ -297,7 +303,10 @@ class JobMover(object):
             # local replicas
             for ddm in fdat.inputddms: ## iterate over local ddms and check if replica is exist here
 
-                if ddm not in r['rses']: # no replica found for given local ddm
+                #pfns = r.get('rses', {}).get(ddm)  ## use me when Rucio server-side sort fix will be deployed
+                pfns = ordered_replicas.get(ddm)    ## quick workaround, use mannually sorted data
+
+                if not pfns: # no replica found for given local ddm
                     continue
 
                 ddm_se, ddm_path = '',''
@@ -306,46 +315,50 @@ class JobMover(object):
                 if def_protocol:
                     ddm_se, ddm_path = def_protocol[0], def_protocol[2]
 
-                fdat.replicas.append((ddm, r['rses'][ddm], ddm_se, ddm_path))
+                fdat.replicas.append((ddm, pfns, ddm_se, ddm_path))
 
                 if not has_direct_remoteinput_replicas:
-                    has_direct_remoteinput_replicas = bool(get_preferred_replica(r['rses'][ddm], self.direct_remoteinput_allowed_schemas))
+                    has_direct_remoteinput_replicas = bool(get_preferred_replica(pfns, self.direct_remoteinput_allowed_schemas))
 
-            if (not fdat.replicas or ( fdat.accessmode == 'direct' and not has_direct_remoteinput_replicas)) and fdat.allowRemoteInputs:
+            if ((not fdat.replicas or (fdat.accessmode == 'direct' and not has_direct_remoteinput_replicas)) and fdat.allowRemoteInputs) or (not fdat.replicas and fdat.storageId >= 0):
                 if fdat.accessmode == 'direct':
                     allowed_schemas = self.direct_remoteinput_allowed_schemas
                 else:
                     allowed_schemas = self.remoteinput_allowed_schemas
                 self.log("No local replicas found for lfn=%s or direct access is set but no local direct access files, but allowRemoteInputs is set, looking for remote inputs" % (fdat.lfn))
                 self.log("consider first/closest replica, accessmode=%s, remoteinput_allowed_schemas=%s" % (fdat.accessmode, allowed_schemas))
-                #self.log('rses=%s' % r['rses'])
-                for ddm, replicas in r['rses'].iteritems():
-                    replica = get_preferred_replica(r['rses'][ddm], self.remoteinput_allowed_schemas)
+
+                for ddm, pfns in r['rses'].iteritems():
+                    pfns = ordered_replicas.get(ddm) or [] ## quick workaround, use manually sorted data, REMOVE ME when Rucio server-side sort fix will be deployed
+
+                    replica = get_preferred_replica(pfns, self.remoteinput_allowed_schemas)
                     if not replica:
                         continue
 
                     ddm_se, ddm_path = '', ''
 
                     # remoteinput supported replica (root) replica has been found
-                    fdat.replicas.append((ddm, r['rses'][ddm], ddm_se, ddm_path))
+                    fdat.replicas.append((ddm, pfns, ddm_se, ddm_path))
                     # break # ignore other remote replicas/sites
 
             # verify filesize and checksum values
 
-            if fdat.filesize != r['bytes']:
-                self.log("WARNING: filesize value of input file=%s mismatched with info got from Rucio replica:  job.indata.filesize=%s, replica.filesize=%s, fdat=%s" % (fdat.lfn, fdat.filesize, r['bytes'], fdat))
             if fdat.filesize in [None, 'NULL', '', 0]:
                 self.log("WARNING: filesize is not defined, assigning info got from Rucio to it.")
                 fdat.filesize = r['bytes']
+            elif fdat.filesize != r['bytes']:
+                self.log("WARNING: filesize value of input file=%s mismatched with info got from Rucio replica:  job.indata.filesize=%s, replica.filesize=%s, fdat=%s" % (fdat.lfn, fdat.filesize, r['bytes'], fdat))
+
             cc_ad = 'ad:%s' % r['adler32']
             cc_md = 'md:%s' % r['md5']
-            if fdat.checksum not in [cc_ad, cc_md]:
-                self.log("WARNING: checksum value of input file=%s mismatched with info got from Rucio replica:  job.indata.checksum=%s, replica.checksum=%s, fdat=%s" % (fdat.lfn, fdat.filesize, (cc_ad, cc_md), fdat))
-            if fdat.checksum in [None, 'NULL']:
+            if fdat.checksum in [None, 'NULL', '']:
+                self.log("WARNING: checksum is not defined, assigning info got from Rucio to it.")
                 if r['adler32']:
                     fdat.checksum = cc_ad
                 elif r['md5']:
                     fdat.checksum = cc_md
+            elif fdat.checksum not in [cc_ad, cc_md]:
+                self.log("WARNING: checksum value of input file=%s mismatched with info got from Rucio replica:  job.indata.checksum=%s, replica.checksum=%s, fdat=%s" % (fdat.lfn, fdat.checksum, (cc_ad, cc_md), fdat))
 
         self.log('Number of resolved replicas:\n' + '\n'.join(["lfn=%s: replicas=%s, allowRemoteInputs=%s, is_directaccess=%s" % (e.lfn, len(e.replicas), e.allowRemoteInputs,  e.is_directaccess(ensure_replica=False)) for e in files]))
 
@@ -497,12 +510,15 @@ class JobMover(object):
 
 
         if es_local_files:
-            self.log("Will stagin es local files: %s" % [f.lfn for f in es_local_files])
-            self.trace_report.update(eventType='get_es')
-            transferred_files_es, failed_transfers_es = self.stagein_real(files=es_local_files, activity='pr', analyjob=analyjob)
-            transferred_files += transferred_files_es
-            failed_transfers += failed_transfers_es
-            self.log("Failed to transfer files: %s" % failed_transfers)
+            try:
+                self.log("Will stagin es local files: %s" % [f.lfn for f in es_local_files])
+                self.trace_report.update(eventType='get_es')
+                transferred_files_es, failed_transfers_es = self.stagein_real(files=es_local_files, activity='pr', analyjob=analyjob)
+                transferred_files += transferred_files_es
+                failed_transfers += failed_transfers_es
+                self.log("Failed to transfer files: %s" % failed_transfers)
+            except Exception, e:
+                self.log("Failed to stagein eventservice local files: %s" % traceback.format_exc())
 
         remain_es_files = [e for e in es_files if e.status not in ['remote_io', 'transferred', 'no_transfer']]
         if remain_es_files:
@@ -574,7 +590,7 @@ class JobMover(object):
 
         # direct access settings
         allow_directaccess, directaccesstype = self.get_directaccess() ## resolve Site depended direct_access settings
-        self.log("direct access mode requsted by task: job.accessmode=%s" % self.job.accessmode)
+        self.log("direct access mode requested by task: job.accessmode=%s" % self.job.accessmode)
         self.log("direct access mode supported by the site: allow_directaccess=%s (type=%s)" % (allow_directaccess, directaccesstype))
 
         if self.job.accessmode != 'direct': ## task forbids direct access
@@ -596,6 +612,9 @@ class JobMover(object):
         sitemover_objects = {}
         is_replicas_resolved = False
 
+        # remember the original tracing choise
+        useTracingService = self.useTracingService
+
         for fnum, fdata in enumerate(remain_files, 1):
 
             self.log('INFO: prepare to transfer (stage-in) %s/%s file: lfn=%s' % (fnum, nfiles, fdata.lfn))
@@ -612,6 +631,13 @@ class JobMover(object):
 
                 copytool, copysetup = dat.get('copytool'), dat.get('copysetup')
 
+                # switch off tracing if copytool=rucio, as this is handled internally by rucio
+                #if copytool == 'rucio':
+                #    self.useTracingService = False
+                #else:
+                #    # re-activate tracing in case rucio is not used for staging
+                #    self.useTracingService = useTracingService
+
                 try:
                     sitemover = sitemover_objects.get(copytool)
                     if not sitemover:
@@ -625,10 +651,12 @@ class JobMover(object):
                         dat['scheme'] = sitemover.schemes
                         self.log("is_directaccess=%s" % is_directaccess)
                         self.log("self.job.usePrefetcher=%s"%str(self.job.usePrefetcher))
+                        dat.pop('primary_scheme', None)
                         if is_directaccess or self.job.usePrefetcher:
                             if dat['scheme'] and dat['scheme'][0] != self.remoteinput_allowed_schemas[0]:  ## ensure that root:// is coming first in allowed schemas required for further resolve_replica()
                                 dat['scheme'] = self.remoteinput_allowed_schemas + dat['scheme'] ## add supported schema for direct access
                             self.log("INFO: prepare direct access mode: force to extend accepted protocol schemes to use direct access, schemes=%s" % dat['scheme'])
+                            dat['primary_scheme'] = self.direct_input_allowed_schemas  ## will be used to look up first the replicas allowed for direct access mode
 
                 except Exception, e:
                     self.log('WARNING: Failed to get SiteMover: %s .. skipped .. try to check next available protocol, current protocol details=%s' % (e, dat))
@@ -685,7 +713,9 @@ class JobMover(object):
                             self.log('INFO: cross-sites checks: protocol_site=%s and replica_site=%s mismatched but remote inputs is allowed.. keep processing for copytool=%s' % (protocol_site, replica_site, copytool))
 
                 # fill trace details
-                self.trace_report.update(localSite=fdata.ddmendpoint, remoteSite=fdata.ddmendpoint)
+                localSite = os.environ.get('DQ2_LOCAL_SITE_ID', None)
+                localSite = localSite if localSite else fdata.ddmendpoint
+                self.trace_report.update(localSite=localSite, remoteSite=fdata.ddmendpoint)
                 self.trace_report.update(filename=fdata.lfn, guid=fdata.guid.replace('-', ''))
                 self.trace_report.update(scope=fdata.scope, dataset=fdata.prodDBlock)
 
@@ -698,6 +728,8 @@ class JobMover(object):
                     self.trace_report.update(url=fdata.turl, clientState='FOUND_ROOT', stateReason='direct_access')
                     self.sendTrace(self.trace_report)
                     continue
+                else:
+                    self.log('Direct access will not be user for lfn=%s since fdata.is_directaccess()=%s, is_directaccess=%s' % (fdata.lfn, fdata.is_directaccess(), is_directaccess))
 
                 # check prefetcher (the turl must be saved for prefetcher to use)
                 # note: for files to be prefetched, there's no entry for the file_state, so the updateFileState needs
@@ -759,6 +791,20 @@ class JobMover(object):
                         time.sleep(sleep_time)
 
                     self.log("Get attempt %s/%s for file (%s/%s) with lfn=%s .. sitemover=%s" % (_attempt, self.stageinretry, fnum, nfiles, fdata.lfn, sitemover))
+
+                    fdata.retries = _attempt - 1
+                    if _attempt > 1: # if not first stage-in attempt, try to use different ddm protocols
+                        try:
+                            new_replica = sitemover.resolve_replica(fdata, dat)
+                        except Exception, e:
+                            self.log("Failed to resolve new replica for attempts=%s, error=%s" % (_attempt, e))
+                            new_replica = None
+
+                        if new_replica and new_replica.get('ddmendpoint') == fdata.ddmendpoint:
+                            if new_replica.get('surl'):
+                                fdata.surl = new_replica['surl'] # TO BE CLARIFIED if it's still used and need
+                            if new_replica.get('pfn'):
+                                fdata.turl = new_replica['pfn']
 
                     try:
                         result = sitemover.get_data(fdata)
@@ -837,7 +883,8 @@ class JobMover(object):
             if fdata.status == 'error' and not skip_transfer_failure:
                 self.log('stage-in of file (%s/%s) with lfn=%s failed: code=%s .. skip transferring remaining files..' % (fnum, nfiles, fdata.lfn, fdata.status_code))
                 dumpFileStates(self.workDir, self.job.jobId, ftype="input")
-                raise PilotException("STAGEIN FAILED: %s: lfn=%s, error=%s" % (PilotErrors.getErrorStr(fdata.status_code), fdata.lfn, getattr(fdata, 'status_message', '')), code=fdata.status_code, state='STAGEIN_FILE_FAILED')
+                status_code = fdata.status_code if fdata.status_code != PilotErrors.ERR_UNKNOWN else PilotErrors.ERR_STAGEINFAILED
+                raise PilotException("STAGEIN FAILED: %s: lfn=%s, error=%s" % (PilotErrors.getErrorStr(status_code), fdata.lfn, getattr(fdata, 'status_message', '')), code=status_code, state='STAGEIN_FILE_FAILED')
 
             if bad_copytools:
                 raise PilotException("STAGEIN FAILED: bad copytools: no supported copytools", code=PilotErrors.ERR_NOSTORAGE, state='STAGEIN_BAD_COPYTOOLS')
@@ -1117,6 +1164,9 @@ class JobMover(object):
         remain_files = [e for e in ddmfiles.get(ddmendpoint) if e.status not in ['transferred']]
         nfiles = len(remain_files)
 
+        # remember the original tracing choise
+        useTracingService = self.useTracingService
+
         for fnum, fdata in enumerate(remain_files, 1):
 
             self.log('INFO: prepare to transfer (stage-out) %s/%s file: lfn=%s, fspec.ddmendpoint=%s, activity=%s' % (fnum, nfiles, fdata.lfn, fdata.ddmendpoint, activity))
@@ -1140,6 +1190,13 @@ class JobMover(object):
                         break
 
                     copytool, copysetup = cpsettings.get('copytool'), cpsettings.get('copysetup')
+
+                    # switch off tracing if copytool=rucio, as this is handled internally by rucio
+                    #if copytool == 'rucio':
+                    #    self.useTracingService = False
+                    #else:
+                    #    # re-activate tracing in case rucio is not used for staging
+                    #    self.useTracingService = useTracingService
 
                     try:
                         sitemover = sitemover_objects.get(copytool)
@@ -1175,7 +1232,9 @@ class JobMover(object):
                     self.log("Copy command [stage-out][%s]: %s, sitemover=%s" % (activity, copytool, sitemover))
                     self.log("Copy setup   [stage-out][%s]: %s" % (activity, copysetup))
 
-                    self.trace_report.update(protocol=copytool, localSite=ddmendpoint, remoteSite=ddmendpoint)
+                    localSite = os.environ.get('DQ2_LOCAL_SITE_ID', None)
+                    localSite = localSite if localSite else ddmendpoint
+                    self.trace_report.update(protocol=copytool, localSite=localSite, remoteSite=ddmendpoint)
 
                     # validate se value?
                     se, se_path = dat.get('se', ''), dat.get('path', '')
@@ -1269,7 +1328,8 @@ class JobMover(object):
             if fdata.status == 'error' and not skip_transfer_failure:
                 self.log('[stage-out] [%s] failed to transfer file (%s/%s) with lfn=%s: code=%s .. skip transferring of remaining data..' % (activity, fnum, nfiles, fdata.lfn, fdata.status_code))
                 dumpFileStates(self.workDir, self.job.jobId, ftype="output")
-                raise PilotException("STAGEOUT FAILED: %s: lfn=%s, error=%s" % (PilotErrors.getErrorStr(fdata.status_code), fdata.lfn, getattr(fdata, 'status_message', '')), code=fdata.status_code, state='STAGEOUT_FILE_FAILED')
+                status_code = fdata.status_code if fdata.status_code != PilotErrors.ERR_UNKNOWN else PilotErrors.ERR_STAGEOUTFAILED
+                raise PilotException("STAGEOUT FAILED: %s: lfn=%s, error=%s" % (PilotErrors.getErrorStr(status_code), fdata.lfn, getattr(fdata, 'status_message', '')), code=status_code, state='STAGEOUT_FILE_FAILED')
 
             if bad_copytools:
                 raise PilotException("STAGEOUT FAILED: bad copytools: no supported copytools", code=PilotErrors.ERR_NOSTORAGE, state='STAGEOUT_BAD_COPYTOOLS')
@@ -1335,7 +1395,7 @@ class JobMover(object):
         if not ddmendpoints:
             raise PilotException("Failed to put files: Output ddmendpoint list is not set", code=PilotErrors.ERR_NOSTORAGE)
         if not files:
-            raise PilotException("Failed to put files: empty file list to be transferred")
+            raise PilotException("Failed to put files: empty file list to be transferred", code=PilotErrors.ERR_STAGEOUTFAILED)
 
         missing_ddms = set(ddmendpoints) - set(self.ddmconf)
 
@@ -1416,7 +1476,9 @@ class JobMover(object):
         surl_prot = surl_prot[0] # take first
         self.log("[do_put_files] SURL protocol to be used: %s" % surl_prot)
 
-        self.trace_report.update(localSite=ddmendpoint, remoteSite=ddmendpoint)
+        localSite = os.environ.get('DQ2_LOCAL_SITE_ID', None)
+        localSite = localSite if localSite else ddmendpoint
+        self.trace_report.update(localSite=localSite, remoteSite=ddmendpoint)
 
         transferred_files, failed_transfers = [], []
 
@@ -1555,12 +1617,13 @@ class JobMover(object):
         """
 
         if not self.useTracingService:
-            self.log("Experiment is not using Tracing service. skip sending tracing report")
             return False
 
-        url = 'https://rucio-lb-prod.cern.ch/traces/'
+        # remove any escape characters that might be present in the stateReason field
+        stateReason = report.get('stateReason', '')
+        report.update(stateReason=stateReason.replace('\\', ''))
 
-        self.log("Tracing server: %s" % url)
+        url = 'https://rucio-lb-prod.cern.ch/traces/'
         self.log("Sending tracing report: %s" % report)
 
         try:

@@ -256,24 +256,29 @@ class BaseSiteMover(object):
                 if replica:
                     break
 
+        def get_preferred_replica(replicas, allowed_schemas):
+            for r in replicas:
+                for sval in allowed_schemas:
+                    if r and r.startswith('%s://' % sval):
+                        return r
+            return None
+
         if not replica: # resolve replica from Rucio: use exact pfn from Rucio replicas
-            for sval in scheme:
-                for ddmendpoint, replicas, ddm_se, ddm_path in fspec.replicas:
-                    if not replicas: # ignore ddms with no replicas
-                        continue
-                    surl = replicas[0] # assume srm protocol is first entry
-                    self.log("[stage-in] surl (srm replica) from Rucio: pfn=%s, ddmendpoint=%s, ddm.se=%s, ddm.se_path=%s" % (surl, ddmendpoint, ddm_se, ddm_path))
-                    for r in replicas:
-                        if r.startswith("%s://" % sval):
-                            replica = r
-                            break
-                    if replica:
-                        break
+            for ddmendpoint, replicas, ddm_se, ddm_path in fspec.replicas:
+                if not replicas: # ignore ddms with no replicas
+                    continue
+                pschema = protocol.get('primary_scheme')
+                if pschema:  ## look up first primary schemas if requested
+                    replica = get_preferred_replica(replicas, pschema)
+                if not replica:
+                    replica = get_preferred_replica(replicas, scheme)
                 if replica:
+                    surl = get_preferred_replica(replicas, ['srm']) or replicas[0] # prefer SRM protocol for surl -- to be verified
+                    self.log("[stage-in] surl (srm replica) from Rucio: pfn=%s, ddmendpoint=%s, ddm.se=%s, ddm.se_path=%s" % (surl, ddmendpoint, ddm_se, ddm_path))
                     break
 
         if not replica: # replica not found
-            error = 'Failed to find replica for input file, protocol=%s, fspec=%s' % (protocol, fspec)
+            error = 'Failed to find replica for input file, protocol=%s, fspec=%s, allowed schemas=%s' % (protocol, fspec, scheme)
             self.log("resolve_replica: %s" % error)
             raise PilotException(error, code=PilotErrors.ERR_REPNOTFOUND)
 
@@ -317,7 +322,7 @@ class BaseSiteMover(object):
         src_fsize = fspec.filesize
 
         if not self.shouldVerifyStageIn():
-            self.log("skipped stage-in verification for lfn=%" % fspec.lfn)
+            self.log("skipped stage-in verification for lfn=%s" % fspec.lfn)
             return {'checksum': dst_checksum, 'checksum_type':dst_checksum_type, 'filesize':src_fsize}
 
         src_checksum, src_checksum_type = fspec.get_checksum()
@@ -340,7 +345,7 @@ class BaseSiteMover(object):
             self.log("verify StageIn: caught exception while getting remote file=%s checksum: %s .. skipped" % (source, e))
 
         try:
-            if dst_checksum and dst_checksum_type: # verify against source
+            if dst_checksum and dst_checksum_type and src_checksum and src_checksum_type: # verify against source(currently src_checksum is empty when merging es files from NorduGrid)
 
                 is_verified = src_checksum and src_checksum_type and dst_checksum == src_checksum and dst_checksum_type == src_checksum_type
 
@@ -373,7 +378,7 @@ class BaseSiteMover(object):
 
                 self.log("verifying stagein done. [by checksum] [%s]" % source)
                 self.trace_report.update(clientState="DONE")
-                return {'checksum': dst_checksum, 'checksum_type':dst_checksum_type, 'filesize':dst_fsize}
+                return {'checksum': dst_checksum, 'checksum_type': dst_checksum_type, 'filesize': dst_fsize}
 
         except PilotException:
             raise
@@ -384,10 +389,16 @@ class BaseSiteMover(object):
         try:
             if not src_fsize:
                 src_fsize = self.getRemoteFileSize(source)
-            is_verified = src_fsize and src_fsize == dst_fsize
 
             self.log("Remote filesize [%s]: %s" % (os.path.dirname(destination), src_fsize))
             self.log("Local  filesize [%s]: %s" % (os.path.dirname(destination), dst_fsize))
+
+            if not src_fsize:
+                warn = "Source size is unknown, will pass(mark it as successful)"
+                self.log(warn)
+                return {'checksum': dst_checksum, 'checksum_type': dst_checksum_type, 'filesize': dst_fsize}
+
+            is_verified = src_fsize and src_fsize == dst_fsize
             self.log("filesize is_verified = %s" % is_verified)
 
             if not is_verified:
@@ -618,6 +629,15 @@ class BaseSiteMover(object):
             ret['rcode'] = PilotErrors.ERR_CHKSUMNOTSUP
             ret['state'] = 'CHKSUM_NOTSUP'
             ret['error'] = output
+        elif "does not match the checksum" in output:
+            if 'adler32' in output:
+                state = 'AD_MISMATCH'
+                rcode = PilotErrors.ERR_GETADMISMATCH
+            else:
+                state = 'MD5_MISMATCH'
+                rcode = PilotErrors.ERR_GETMD5MISMATCH
+            ret['rcode'] = rcode
+            ret['state'] = state
 
         return ret
 

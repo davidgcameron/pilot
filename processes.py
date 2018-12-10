@@ -4,7 +4,6 @@ import signal
 import time
 import re
 import pUtil
-from subprocess import Popen, PIPE
 
 def findProcessesInGroup(cpids, pid):
     """ recursively search for the children processes belonging to pid and return their pids
@@ -64,12 +63,6 @@ def getProcessCommands(euid, pids):
 
     return processCommands
 
-
-def printProcessTree():
-    import subprocess
-    pl = subprocess.Popen(['ps', '--forest', '-ef'], stdout=subprocess.PIPE).communicate()[0]
-    pUtil.tolog(pl)
-
 def dumpStackTrace(pid):
     """ run the stack trace command """
 
@@ -98,7 +91,7 @@ def killProcesses(pid, pgrp):
         try:
             os.killpg(pgrp, signal.SIGTERM)
         except Exception,e:
-            pUtil.tolog("WARNING: Exception thrown when killing the child group process under SIGTERM, wait for kill -9 later: %s" % (e))
+            pUtil.tolog("WARNING: Exception thrown when killing the child group process with SIGTERM: %s" % (e))
             _sleep = False
         else:
             pUtil.tolog("(SIGTERM sent)")
@@ -111,7 +104,7 @@ def killProcesses(pid, pgrp):
         try:
             os.killpg(pgrp, signal.SIGKILL)
         except Exception,e:
-            pUtil.tolog("WARNING: Exception thrown when killing the child group process under SIGTERM, wait for kill -9 later: %s" % (e))
+            pUtil.tolog("WARNING: Exception thrown when killing the child group process with SIGKILL: %s" % (e))
         else:
             pUtil.tolog("(SIGKILL sent)")
             status = True
@@ -189,6 +182,9 @@ def killOrphans():
         pUtil.tolog("BOINC job, not looking for orphan processes")
         return
 
+    if 'PILOT_NOKILL' in os.environ:
+        return
+
     pUtil.tolog("Searching for orphan processes")
     cmd = "ps -o pid,ppid,args -u %s" % (commands.getoutput("whoami"))
 
@@ -212,12 +208,17 @@ def killOrphans():
                 if args.endswith('bash'):
                     pUtil.tolog("Will not kill bash process")
                 else:
-                    cmd = 'kill -9 %s' % (pid)
-                    ec, rs = commands.getstatusoutput(cmd)
-                    if ec != 0:
-                        pUtil.tolog("!!WARNING!!2999!! %s" % (rs))
-                    else:
-                        pUtil.tolog("Killed orphaned process %s (%s)" % (pid, args))
+                    try:
+                        os.killpg(int(pid), signal.SIGKILL)
+                    except Exception as e:
+                        pUtil.tolog("!!WARNING!!2323!! Failed to send SIGKILL: %s" % e)
+                        cmd = 'kill -9 %s' % (pid)
+                        ec, rs = commands.getstatusoutput(cmd)
+                        if ec != 0:
+                            pUtil.tolog("!!WARNING!!2999!! %s" % (rs))
+                        else:
+                            pUtil.tolog("Killed orphaned process %s (%s)" % (pid, args))
+                    pUtil.tolog("Killed orphaned process group %s (%s)" % (pid, args))
 
     if count == 0:
         pUtil.tolog("Did not find any orphan processes")
@@ -263,7 +264,7 @@ def getMaxMemoryUsageFromCGroups():
             else:
                 pUtil.tolog("!!WARNING!!2211!! Invalid format: %s (expected ..:memory:[path])" % (out))
     else:
-        pUtil.tolog("Path %s does not exist (not a CGROUPS site)")
+        pUtil.tolog("Path %s does not exist (not a CGROUPS site)" % path)
 
     return max_memory
 
@@ -289,3 +290,75 @@ def isCGROUPSSite():
 #            status = True
 
     return status
+
+def get_cpu_consumption_time(t0):
+    """
+    Return the CPU consumption time for child processes measured by system+user time from os.times().
+    Note: the os.times() tuple is user time, system time, s user time, s system time, and elapsed real time since a
+    fixed point in the past.
+
+    :param t0: initial os.times() tuple prior to measurement.
+    :return: system+user time for child processes (float).
+    """
+
+    t1 = os.times()
+    user_time = t1[2] - t0[2]
+    system_time = t1[3] - t0[3]
+    pUtil.tolog('user time=%d' % user_time)
+    pUtil.tolog('system time=%d' % system_time)
+
+    return user_time + system_time
+
+def get_instant_cpu_consumption_time(pid):
+    """
+    Return the CPU consumption time (system+user time) for a given process, by parsing /prod/pid/stat.
+    Note 1: the function returns 0.0 if the pid is not set.
+    Note 2: the function must sum up all the user+system times for both the main process (pid) and the child
+    processes, since the main process is most likely spawning new processes.
+
+    :param pid: process id (int).
+    :return:  system+user time for a given pid (float).
+    """
+
+    utime = None
+    stime = None
+    cutime = None
+    cstime = None
+
+    hz = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
+    if type(hz) != int:
+        pUtil.tolog('Unknown SC_CLK_TCK: %s' % str(hz))
+        return 0.0
+
+    if pid and hz and hz > 0:
+        path = "/proc/%d/stat" % pid
+        if os.path.exists(path):
+            with open(path) as fp:
+                fields = fp.read().split(' ')[13:17]
+                utime, stime, cutime, cstime = [(float(f) / hz) for f in fields]
+
+    if utime and stime and cutime and cstime:
+        # sum up all the user+system times for both the main process (pid) and the child processes
+        cpu_consumption_time = utime + stime + cutime + cstime
+        pUtil.tolog('CPU consumption time for pid=%d' % pid)
+        pUtil.tolog('user time=%d' % utime)
+        pUtil.tolog('system time=%d' % stime)
+        pUtil.tolog('user time child=%d' % cutime)
+        pUtil.tolog('system time child=%d' % cstime)
+    else:
+        cpu_consumption_time = 0.0
+
+    return cpu_consumption_time
+
+def get_current_cpu_consumption_time(pid):
+    # get all the child processes                                                                                                                               
+    children = []
+    findProcessesInGroup(children, pid)
+
+    cpuconsumptiontime = 0
+    for _pid in children:
+        _cpuconsumptiontime = get_instant_cpu_consumption_time(_pid)
+        if _cpuconsumptiontime:
+            cpuconsumptiontime += _cpuconsumptiontime
+
+    return cpuconsumptiontime

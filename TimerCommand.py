@@ -30,7 +30,7 @@ class TimerCommand(object):
     def run(self, timeout=3600):
         def target():
             # print 'Thread started'
-            self.process = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
+            self.process = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True, preexec_fn=os.setsid)
             self.stdout, self.stderr = self.process.communicate()
             # print 'Thread finished'
 
@@ -45,12 +45,12 @@ class TimerCommand(object):
                 self.process.terminate()
                 thread.join(2)
                 if thread.is_alive():
-                    os.kill(int(self.process.pid), signal.SIGKILL)
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
                     thread.join(2)
             except:
                 if thread.is_alive():
                     try:
-                        os.kill(int(self.process.pid), signal.SIGKILL)
+                        os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
                     except:
                         pass
                     thread.join(2)
@@ -63,7 +63,8 @@ class TimerCommand(object):
             self.stderr = ''
         if not self.stdout:
             self.stdout = ''
-        self.stdout += " Error: " + self.stderr
+        if self.stderr and self.stderr != '':
+            self.stdout += " Error: " + self.stderr
 
         if self.process:
             returncode = self.process.returncode

@@ -608,7 +608,9 @@ class ATLASExperiment(Experiment):
                     "saga",
                     "radical",
                     "movers",
-                    "ckpt*"]
+                    "_joproxy15",
+                    "ckpt*",
+                    "HAHM_*"]
 
         # remove core and pool.root files from AthenaMP sub directories
         try:
@@ -1439,6 +1441,13 @@ class ATLASExperiment(Experiment):
             else:
                 job.pilotErrorDiag = "Payload failed due to unknown reason (check payload stdout)"
                 job.result[2] = error.ERR_UNKNOWN
+
+            # Any errors due to signals can be ignored if the job was killed because of out of memory
+            if os.path.exists(os.path.join(job.workdir, "MEMORYEXCEEDED")):
+                tolog("Ignoring any previously detected errors (like signals) since MEMORYEXCEEDED file was found")
+                job.pilotErrorDiag = "Payload exceeded maximum allowed memory"
+                job.result[2] = error.ERR_PAYLOADEXCEEDMAXMEM
+
             tolog("!!FAILED!!3000!! %s" % (job.pilotErrorDiag))
 
         # set the trf diag error
@@ -1568,7 +1577,7 @@ class ATLASExperiment(Experiment):
 
         ec = 0
         pilotErrorDiag = ""
-        tolog("pre verifyNCoresSettings")
+
         # Make sure that ATHENA_PROC_NUMBER has a proper value for the current job
         if job.prodSourceLabel != "install":
             ec, pilotErrorDiag = self.verifyNCoresSettings(job.coreCount)

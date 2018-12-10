@@ -185,7 +185,7 @@ def argParser(argv):
             env['queuename'] = a
 
         elif o == "-i":
-            if a == "PR" or (a and a.startswith("RC")):
+            if a == "PR" or (a and a.startswith("RC")) or (a and a.startswith("ALRB")):
                 env['pilot_version_tag'] = a
             else:
                 print "Unknown pilot version tag: %s" % (a)
@@ -1992,6 +1992,8 @@ def getProdSourceLabel():
                 prodSourceLabel = "rcm_test"
             elif env['pilot_version_tag'] == 'RCMA': # RC Mover for ANALY site: temporary fix
                 prodSourceLabel = "rcm_test"
+        elif env['pilot_version_tag'] == 'ALRB':
+            prodSourceLabel = "rc_alrb"
         elif env['pilot_version_tag'] == "DDM":
             prodSourceLabel = "ddm"
 
@@ -2146,7 +2148,7 @@ def backupDispatcherResponse(response, tofile):
 def dumpEnv():
     localEnv = {}
     localEnv['uflag'] = env['uflag']
-    localEnv['pilot_version_tag'] = env ['pilot_version_tag']
+    localEnv['pilot_version_tag'] = env['pilot_version_tag']
     localEnv['workingGroup'] = env['workingGroup']
     localEnv['countryGroup'] = env['countryGroup']
     localEnv['allowOtherCountry'] = env['allowOtherCountry']
@@ -2219,7 +2221,7 @@ def kill_worker():
     """
 
     from FileHandling import touch
-    touch(join(env['pilot_initdir'], "kill_worker"))
+    touch(os.path.join(env['pilot_initdir'], "kill_worker"))
 
 def getNewJob(tofile=True):
     """ Get a new job definition from the jobdispatcher or from file """
@@ -2302,7 +2304,7 @@ def getNewJob(tofile=True):
 
                 try:
                     if env['experiment']:
-                        data = pUtil.updateDispatcherData4ES(data=data, experiment=env['experiment'], path="")
+                        data = pUtil.updateDispatcherData4ES(data=data, experiment=env['experiment'], path=env['pilot_initdir'])
                 except:
                     import traceback
                     pUtil.tolog("!!WARNING!!1200!! Failed to updateDispatcherData4ES: %s" % traceback.format_exc())
@@ -2652,7 +2654,7 @@ def detect_client_location(site):
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
     except Exception as e:
-        logger.warning('socket() failed to lookup local IP')
+        pUtil.tolog('socket() failed to lookup local IP')
 
     return {'ip': ip,
             'fqdn': socket.getfqdn(),

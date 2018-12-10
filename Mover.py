@@ -13,7 +13,7 @@ from timed_command import timed_command
 
 from pUtil import createPoolFileCatalog, tolog, addToSkipped, removeDuplicates, dumpOrderedItems,\
      hasBeenTransferred, getLFN, makeTransRegReport, readpar, getMaxInputSize, headPilotErrorDiag, getCopysetup,\
-     getCopyprefixLists, getExperiment, getSiteInformation, stripDQ2FromLFN, extractPattern, dumpFile, updateInputFileWithTURLs
+     getCopyprefixLists, getExperiment, getSiteInformation, stripDQ2FromLFN, extractPattern, dumpFile, updateInputFileWithTURLs, getPilotVersion
 from FileHandling import getExtension, getTracingReportFilename, readJSON, getHashedBucketEndpoint, getDirectAccess, useDirectAccessWAN
 from FileStateClient import updateFileState, dumpFileStates
 from RunJobUtilities import updateCopysetups
@@ -99,8 +99,28 @@ def getProperDatasetNames(realDatasetsIn, prodDBlocks, inFiles):
     return dsname, dsdict, rucio_dataset_dictionary
 
 
+def getRSE(ddmEndPoints, fileid=0):
+    """
+    Return the ddmEndPoint corresponding to the fileid number.
+    :param ddmEndPoints: list of ordered ddm endpoints (ddmEndPointIn or ddmEndPointOut)
+    :return: rse (strings)
+    """
+
+    try:
+        rse = ddmEndPoints[fileid]
+    except Exception, e:
+        tolog("Failed to get RSE for fileid=%d from ddmEndPoints=%s: %s" % (fileid, str(ddmEndPoints), e))
+        rse = "unknown"
+
+    if rse == "":
+        tolog("!!WARNING!!1212!! RSE for fileid=%d could not be extracted from ddmEndPoints=%s: empty RSE (reset to unknown)" % (fileid, str(ddmEndPoints)))
+        rse = "unknown"
+
+    return rse
+
+
 # new mover implementation
-def put_data_new(job, jobSite, stageoutTries, log_transfer=False, special_log_transfer=False, workDir=None):
+def put_data_new(job, jobSite, stageoutTries, log_transfer=False, special_log_transfer=False, workDir=None, pinitdir=""):
     """
         Do jobmover.stageout_outfiles or jobmover.stageout_logfiles (if log_transfer=True)
         or jobmover.stageout_logfiles_os (if special_log_transfer=True)
@@ -128,7 +148,9 @@ def put_data_new(job, jobSite, stageoutTries, log_transfer=False, special_log_tr
     if job.isAnalysisJob():
         eventType += "_a"
 
-    mover.trace_report = TraceReport(pq=jobSite.sitename, localSite=jobSite.sitename, remoteSite=jobSite.sitename, dataset="", eventType=eventType)
+    rse = getRSE(job.ddmEndPointOut)  # at this point, get the RSE for the first file in the list, fileid=0
+    client = getClientVersionString(pinitdir)
+    mover.trace_report = TraceReport(pq=jobSite.sitename, localSite=rse, remoteSite=rse, dataset="", eventType=eventType, eventVersion=client)
     mover.trace_report.init(job)
     error = None
     try:
@@ -184,7 +206,7 @@ def put_data_new(job, jobSite, stageoutTries, log_transfer=False, special_log_tr
     return 0, "", fields, "", len(transferred_files), 0
 
 # new mover implementation
-def put_data_es(job, jobSite, stageoutTries, files, workDir=None, activity=None):
+def put_data_es(job, jobSite, stageoutTries, files, workDir=None, activity=None, pinitdir=""):
     """
         Do jobmover.stageout_outfiles or jobmover.stageout_logfiles (if log_transfer=True)
         or jobmover.stageout_logfiles_os (if special_log_transfer=True)
@@ -206,7 +228,9 @@ def put_data_es(job, jobSite, stageoutTries, files, workDir=None, activity=None)
 
     eventType = "put_es"
 
-    mover.trace_report = TraceReport(pq=jobSite.sitename, localSite=jobSite.sitename, remoteSite=jobSite.sitename, dataset="", eventType=eventType)
+    rse = getRSE(job.ddmEndPointOut)  # at this point, get the RSE for the first file in the list, fileid=0
+    client = getClientVersionString(pinitdir)
+    mover.trace_report = TraceReport(pq=jobSite.sitename, localSite=rse, remoteSite=rse, dataset="", eventType=eventType, eventVersion=client)
     mover.trace_report.init(job)
     error = None
     storageId = None
@@ -249,6 +273,18 @@ def put_data_es(job, jobSite, stageoutTries, files, workDir=None, activity=None)
     return 0, "", storageId
 
 
+def getClientVersionString(pinitdir):
+    """
+
+    :param pinitdir:
+    :return:
+    """
+
+    pilot_version = getPilotVersion(pinitdir)
+    rucio_version = os.environ.get('ATLAS_LOCAL_RUCIOCLIENTS_VERSION', '')
+
+    return pilot_version + '+' + rucio_version
+
 # new mover implementation:
 # keep the list of input arguments as is for smooth migration
 def get_data_new(job,
@@ -277,6 +313,7 @@ def get_data_new(job,
 
     from movers import JobMover
     from movers.trace_report import TraceReport
+    from pUtil import getPilotVersion
 
     si = getSiteInformation(job.experiment)
     si.setQueueName(jobSite.computingElement) # WARNING: SiteInformation is singleton: may be used in other functions! FIX me later
@@ -287,7 +324,10 @@ def get_data_new(job,
     if job.isAnalysisJob():
         eventType += "_a"
 
-    mover.trace_report = TraceReport(pq=jobSite.sitename, localSite=jobSite.sitename, remoteSite=jobSite.sitename, dataset="", eventType=eventType)
+    rse = getRSE(job.ddmEndPointIn)  # at this point, get the RSE for the first file in the list, fileid=0
+
+    client = getClientVersionString(pinitdir)
+    mover.trace_report = TraceReport(pq=jobSite.sitename, localSite=rse, remoteSite=rse, dataset="", eventType=eventType, eventVersion=client)
     mover.trace_report.init(job)
     error = None
     try:
@@ -1113,60 +1153,6 @@ def createPFC4TRF(pfc_name, guidfname):
         tolog("Created PFC for trf/runAthena: %s" % (pfc_name))
         dumpFile(pfc_name, topilotlog=True)
 
-def getTURLFileInfoDic(output, shortGuidList, useShortTURLs, sitename):
-    """ interpret the lcg-getturls stdout and return the TURL file dictionary """
-
-    error = PilotErrors()
-    turlFileInfoDic = {}
-    ec = 0
-    pilotErrorDiag = ""
-
-    # verify that the output does not contain any failures
-    if "Invalid argument" in output or "Failed" in output:
-        pilotErrorDiag = "lcg-getturls failed: %s" % output[-100:]
-        ec = error.ERR_LCGGETTURLS
-    else:
-        # create a list from the command output
-        shortTURLList = output.split('\n')
-
-        # create the short list
-        if useShortTURLs:
-            _shortTURLList = []
-            #site_exclusion_list = ['ANALY_TW-FTT_TEST']
-            from SiteMover import SiteMover
-            s = SiteMover()
-            for t in range(0, len(shortTURLList)):
-                turl = shortTURLList[t]
-                # only use rfio on the sites that supports it
-                #if not sitename in site_exclusion_list:
-                #    turl = _turl.replace(s.stripPath(_turl), 'rfio:')
-                #tolog("DPM site: Updated %s to %s" % (_turl, turl))
-                if turl != "":
-                    _shortTURLList.append(turl)
-            shortTURLList = _shortTURLList
-
-        i = 0
-        for guid in shortGuidList:
-            # update PFN if necessary (e.g. for TRIUMF, SFU, LYON) and add it to the dictionary
-            turlFileInfoDic[guid] = updatePFN(shortTURLList[i])
-            i += 1
-
-    return ec, pilotErrorDiag, turlFileInfoDic
-
-def getDefaultStorage(pfn):
-    """ extract default storage from the pfn """
-
-    defaultSE = ""
-
-    # parse
-    match = re.findall('^[^:]+://([^:/]+)',pfn)
-    if len(match) != 1:
-        tolog("!!WARNING!!2990!! Could not parse default storage from %s" % (pfn))
-    else:
-        defaultSE = match[0]
-
-    return defaultSE
-
 def getMatchingLFN(_lfn, lfns):
     """ Return the proper LFN knowing only the preliminary LFN """
     # Note: the preliminary LFN may contain substrings added to the actual LFN
@@ -1545,78 +1531,6 @@ def convertSURLtoTURL(surl, scope, dataset, token, computingSite, sourceSite, ol
     tolog("Converted SURL: %s to TURL: %s" % (surl, turl))
 
     return turl
-
-def updatePFN(pfn):
-    """ update the PFN if necessary (e.g. for TRIUMF, SFU, LYON) """
-    # based on /afs/cern.ch/sw/ganga/install/5.5.4/python/GangaAtlas/Lib/Athena/ganga-stage-in-out-dq2.py
-
-    _pfn = pfn
-
-    # get the default SE
-    defaultSE = getDefaultStorage(pfn)
-    tolog("Got default SE: %s" % (defaultSE))
-
-    # get the used protocol
-#    if 'ccsrm.in2p3.fr' in defaultSE or 'srm.triumf.ca' in defaultSE:
-    if 'ccsrm.in2p3.fr' in defaultSE or 'triumf.ca' in defaultSE:
-        usedProtocol = 'dcap'
-    else:
-        # get the protocol
-        match = re.search('^(\S*)://.*', pfn)
-        if match:
-            usedProtocol = match.group(1)
-        else:
-            tolog("!!WARNING!!2990!! Protocol could not be extracted from PFN (cannot not update PFN)")
-            return pfn
-
-    tolog("Got protocol: %s" % (usedProtocol))
-
-    # correct PFN for the exceptional sites
-    if usedProtocol == "dcap":
-        # correct the protocol
-        pfn = re.sub('srm://', 'dcap://', pfn)
-
-        # Hack for ccin2p3
-        pfn = re.sub('ccsrm', 'ccdcapatlas', pfn)
-
-        # Hack for TRIUMF
-#        if 'srm.triumf.ca' in defaultSE:
-        if 'triumf.ca' in defaultSE:
-            pfn = re.sub('/atlas/dq2/','//pnfs/triumf.ca/data/atlas/dq2/',pfn)
-            pfn = re.sub('/atlas/users/','//pnfs/triumf.ca/data/atlas/users/',pfn)
-            pfn = re.sub('22125/atlas/','22125//pnfs/triumf.ca/data/atlas/',pfn)
-
-        # Hack for SFU
-        if 'wormhole.westgrid.ca' in defaultSE:
-            pfn = re.sub('/atlas/dq2/','//pnfs/sfu.ca/data/atlas/dq2/',pfn)
-            pfn = re.sub('/atlas/users/','//pnfs/sfu.ca/data/atlas/users/',pfn)
-            pfn = re.sub('22125/atlas/','22125//pnfs/sfu.ca/data/atlas/',pfn)
-
-    elif usedProtocol in ["root", "Xrootd"]:
-        # correct the protocol
-        pfn = re.sub('srm://','root://',pfn)
-
-        # Hack for ccin2p3
-        pfn = re.sub('ccsrm','ccxroot',pfn)
-        pfn = re.sub('ccdcamli01','ccxroot',pfn)
-        pfn = re.sub(':1094',':1094/',pfn)
-
-    elif usedProtocol == "gsidcap":
-        pfn = re.sub('srm://','gfal:gsidcap://',pfn)
-        pfn = re.sub('22128/pnfs','22128//pnfs',pfn)
-        pfn = re.sub('gfal:gfal:','gfal:',pfn)
-
-    # remove any file attributes (e.g. "?svcClass=atlasStripInput&castorVersion=2")
-    #if "?svcClass" in pfn:
-    #    pfn = pfn[:pfn.find("?svcClass")]
-    #    tolog("Updated pfn=%s" % pfn)
-
-    if _pfn != pfn:
-        tolog("Updated PFN from %s to %s" % (_pfn, pfn))
-    else:
-        tolog("No need to update PFN (not exceptional site)")
-
-    return pfn
 
 def getThinFileInfoDic(fileInfoDic):
     """ create a thinner file dictionary to be used with the TURL PFC """
@@ -3034,7 +2948,7 @@ def mover_put_data_new(outputpoolfcstring,      ## pfc XML content with output f
             import copy
             job = copy.deepcopy(job)
             job.workdir = recoveryWorkDir
-        return put_data_new(job, jobSite, stageoutTries, log_transfer, workDir=recoveryWorkDir) + (-1,) # os_bucket_id=-1
+        return put_data_new(job, jobSite, stageoutTries, log_transfer, workDir=recoveryWorkDir, pinitdir=pinitdir) + (-1,) # os_bucket_id=-1
 
 
     # -----
@@ -3092,7 +3006,9 @@ def mover_put_data_new(outputpoolfcstring,      ## pfc XML content with output f
         if not xfiles:
             tolog('files list to transfer is empty .. nothing to do.. skip and continue')
             continue
-        mover.trace_report = TraceReport(localSite=sitename, remoteSite=sitename, dataset=pdsname, eventType=eventType)
+        rse = getRSE(job.ddmEndPointOut)  # at this point, get the RSE for the first file in the list, fileid=0
+        client = getClientVersionString(pinitdir)
+        mover.trace_report = TraceReport(localSite=rse, remoteSite=rse, dataset=pdsname, eventType=eventType, eventVersion=client)
         mover.trace_report.init(job)
 
         output = func(xfiles) #

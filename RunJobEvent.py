@@ -39,9 +39,10 @@ from StoppableThread import StoppableThread
 from pUtil import tolog, isAnalysisJob, readpar, createLockFile, getDatasetDict,\
      tailPilotErrorDiag, getExperiment, getEventService,\
      getSiteInformation, getGUID
-from FileHandling import getExtension, addToOSTransferDictionary, getCPUTimes, getReplicaDictionaryFromXML
+from FileHandling import getExtension, addToOSTransferDictionary, getCPUTimes, getReplicaDictionaryFromXML, writeFile
 from EventRanges import downloadEventRanges, updateEventRange, updateEventRanges
 from movers.base import BaseSiteMover
+from processes import get_cpu_consumption_time
 
 try:
     from PilotYamplServer import PilotYamplServer as MessageServer
@@ -130,6 +131,8 @@ class RunJobEvent(RunJob):
     __nStageOutFailures = 0
     __nStageOutSuccessAfterFailure = 0
     __isLastStageOutFailed = False
+
+    __eventrangesToBeUpdated = []
 
     # error fatal code
     __esFatalCode = None
@@ -1941,7 +1944,7 @@ class RunJobEvent(RunJob):
             files.append(finfo)
             job.addStageOutESFiles(finfo)
 
-        ret_code, ret_str, os_bucket_id = mover.put_data_es(job, jobSite=self.getJobSite(), stageoutTries=2, files=files, workDir=None, activity=storage['activity'])
+        ret_code, ret_str, os_bucket_id = mover.put_data_es(job, jobSite=self.getJobSite(), stageoutTries=2, files=files, workDir=None, activity=storage['activity'], pinitdir=self.__pilot_initdir)
         if os_bucket_id is None or os_bucket_id == 0:
             os_bucket_id = -1
         return ret_code, ret_str, os_bucket_id
@@ -2101,6 +2104,9 @@ class RunJobEvent(RunJob):
                         event_status = [{'eventRanges': chunkEventRanges, 'zipFile': {'lfn': os.path.basename(output_name), 'objstoreID': os_bucket_id, 'fsize': filesize, checksum_type: checksum, 'numEvents': numEvents}}]
                     status, output = updateEventRanges(event_status, url=self.getPanDAServer(), version=1, jobId = self.__job.jobId, pandaProxySecretKey = self.__job.pandaProxySecretKey)
                     tolog("Update Event ranges status: %s, output: %s" % (status, output))
+                    if str(status) != '0':
+                        tolog("Failed to update event ranges, keep it to re-update later")
+                        self.__eventrangesToBeUpdated.append(event_status)
                     self.checkSoftMessage(output)
                 self.__nStageOutSuccessAfterFailure += 1
                 if self.__nStageOutSuccessAfterFailure > 10:
@@ -2249,6 +2255,21 @@ class RunJobEvent(RunJob):
 
         self.__asyncOutputStager_thread.join()
 
+    def updateRemainingEventRanges(self):
+        try:
+            eventrangesToBeUpdated = self.__eventrangesToBeUpdated
+            self.__eventrangesToBeUpdated = []
+            for i in range(len(eventrangesToBeUpdated)):
+                event_ranges_status = eventrangesToBeUpdated.pop(0)
+                status, output = updateEventRanges(event_ranges_status, url=self.getPanDAServer(), version=1, jobId = self.__job.jobId, pandaProxySecretKey = self.__job.pandaProxySecretKey)
+                tolog("Update Event ranges status: %s, output: %s" % (status, output))
+                if str(status) != '0':
+                    tolog("Failed to update event ranges, keep it to re-update later")
+                    self.__eventrangesToBeUpdated.append(event_status)
+                self.checkSoftMessage(output)
+        except:
+            tolog("!!WARNING!!2222!! Failed to updateRemainingEventRanges: %s" % (traceback.format_exc()))
+
     def asynchronousOutputStager_new(self):
         """ Transfer output files to stage-out area asynchronously """
 
@@ -2258,6 +2279,7 @@ class RunJobEvent(RunJob):
         finished_first_upload = False
         first_observe_iskilled = None
         run_time = time.time()
+        update_event_ranges_time = time.time()
         tolog("Asynchronous output stager thread initiated")
         while not self.__asyncOutputStager_thread.stopped():
           try:
@@ -2269,6 +2291,11 @@ class RunJobEvent(RunJob):
                 sleep_time = 5 * 60
                 if first_observe_iskilled is None:
                     first_observe_iskilled = True
+
+            if self.__eventrangesToBeUpdated and time.time() > update_event_ranges_time + 1800:
+                update_event_ranges_time = time.time()
+                self.updateRemainingEventRanges()
+
             if len(self.__stageout_queue) > 0 and (time.time() > run_time + sleep_time or first_observe_iskilled):
                 tolog('Sleeped time: %s, is killed: %s' % (sleep_time, self.__isKilled))
                 if first_observe_iskilled:
@@ -2367,6 +2394,7 @@ class RunJobEvent(RunJob):
             time.sleep(1)
           except:
                tolog("!!WARNING!!2222!! Caught exception: %s" % (traceback.format_exc()))
+        self.updateRemainingEventRanges()
         tolog("Asynchronous output stager thread has been stopped")
 
     @mover.use_newmover(asynchronousOutputStager_new)
@@ -3910,8 +3938,18 @@ if __name__ == "__main__":
 
         # Create and start the AthenaMP process
         t0 = os.times()
-        tolog("t0 = %s" % str(t0))
+        path = os.path.join(job.workdir, 't0_times.txt')
+        if writeFile(path, str(t0)):
+            tolog("Wrote %s to file %s" % (str(t0), path))
+        else:
+            tolog("!!WARNING!!3344!! Failed to write t0 to file, will not be able to calculate CPU consumption time on the fly")
+
         athenaMPProcess = runJob.getSubprocess(thisExperiment, runCommandList[0], stdout=athenamp_stdout, stderr=athenamp_stderr)
+
+        if athenaMPProcess:
+             path = os.path.join(job.workdir, 'cpid.txt')
+             if writeFile(path, str(athenaMPProcess.pid)):
+                 tolog("Wrote cpid=%s to file %s" % (athenaMPProcess.pid, path))
 
         # Start the utility if required
         utility_subprocess = runJob.getUtilitySubprocess(thisExperiment, runCommandList[0], athenaMPProcess.pid, job)
@@ -4300,12 +4338,16 @@ if __name__ == "__main__":
 
         t1 = os.times()
         tolog("t1 = %s" % str(t1))
-        t = map(lambda x, y: x - y, t1, t0)  # get the time consumed
+
         # Try to get the cpu time from the jobReport
         job.cpuConsumptionUnit, cpuConsumptionTime, job.cpuConversionFactor = getCPUTimes(job.workdir)
         if cpuConsumptionTime == 0:
             tolog("!!WARNING!!3434!! Falling back to less accurate os.times() measurement of CPU time")
-            job.cpuConsumptionUnit, cpuConsumptionTime, job.cpuConversionFactor = pUtil.setTimeConsumed(t)
+            cpuconsumptiontime = get_cpu_consumption_time(t0)
+            job.cpuConsumptionTime = int(cpuconsumptiontime)
+            job.cpuConsumptionUnit = 's'
+            job.cpuConversionFactor = 1.0
+
         if cpuConsumptionTime > 0:
             # if payload is killed, cpu time returned from os.times() will not be correct.
             job.cpuConsumptionTime = cpuConsumptionTime

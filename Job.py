@@ -78,7 +78,7 @@ class Job:
         self.isPilotResubmissionRequired = False # Pilot-controlled resubmission
         self.filesizeIn = []               # Input file sizes from the dispatcher
         self.checksumIn = []               # Input file checksums from the dispatcher
-        self.debug = ""                    # debug = True will trigger the pilot to send stdout tail on job update
+        self.debug = False                 # debug = True will trigger the pilot to send stdout tail on job update
         self.lastState = ""                # record the last state of the job
         self.currentState = ""             # Basically the same as result[0] but includes states like "stagein", "stageout"
         self.vmPeakMax = 0                 # Maximum value of vmPeak
@@ -108,6 +108,10 @@ class Job:
         self.dbTime = ""                   # dbTime extracted from jobReport.json, to be used in jobMetrics
         self.dbData = ""                   # dbData extracted from jobReport.json, to be used in jobMetrice
         self.putLogToOS = False            # Job def instruction to ask pilot to transfer log to OS
+        self.writetofile = ""              # path to input file list written to file
+
+        # timing info (for on-the-fly cpu consumption calculation)
+        self.t0 = None
 
         #  event service data
         self.eventService = False          # True for event service jobs
@@ -361,13 +365,11 @@ class Job:
                 self.eventServiceMerge = False
             pUtil.tolog("eventServiceMerge = %s" % str(self.eventServiceMerge))
 
-        # Event Service merge job
+        # Event Service merge job and jobs that require input file lists
         if self.workdir and data.has_key('writeToFile'): #data.has_key('eventServiceMerge') and data['eventServiceMerge'].lower() == "true":
             #if data.has_key('writeToFile'):
-            writeToFile = data['writeToFile']
-            esFileDictionary, orderedFnameList = pUtil.createESFileDictionary(writeToFile)
-            #pUtil.tolog("esFileDictionary=%s" % (esFileDictionary))
-            #pUtil.tolog("orderedFnameList=%s" % (orderedFnameList))
+            self.writetofile = data['writeToFile']
+            esFileDictionary, orderedFnameList = pUtil.createESFileDictionary(self.writetofile)
             if esFileDictionary != {}:
                 if data.has_key('eventServiceMerge') and data['eventServiceMerge'].lower() == "true":
                     eventservice = True
@@ -834,15 +836,82 @@ class Job:
                         else:
                             zip_map[archive].append(file_name)
             else:
-                tolog("!!WARNING!!2323!! Unexpected archive:file entry: %s" % (entry))
+                pUtil.tolog("!!WARNING!!2323!! Unexpected archive:file entry: %s" % (entry))
 
         return zip_map
 
-    def addArchivesToOutput(self, zip_map, outFiles, destinationDblock, destinationDBlockToken, scopeOut):
+    def removeInputFromOutputLists(self, inFiles, outFiles, destinationDblock, destinationDBlockToken, scopeOut, outs):
+        """
+        The zipped input files should be removed from the output lists since they are only needed there to create metadata.
+        """
+
+        for outFile in list(outFiles):  # make a copy of the original list with list(outFiles)
+            if outFile in inFiles:
+                pUtil.tolog("Removing file %s from lists" % outFile)
+                i = outFiles.index(outFile)
+                dummy = outFiles.pop(i)
+                dummy = destinationDblock.pop(i)
+                dummy = destinationDBlockToken.pop(i)
+                dummy = scopeOut.pop(i)
+                # also remove the file from the outs list
+
+                i = outs.index(outFile)
+                dummy = outs.pop(i)
+
+                # ignore outputFileInfo and datasetDict since they are not used in the new movers / just a lookup dictionary
+
+        return outFiles, destinationDblock, destinationDBlockToken, scopeOut, outs
+
+    def addArchivesToOutput(self, zip_map, inFiles, outFiles, dispatchDblock, destinationDblock, dispatchDBlockToken, destinationDBlockToken, scopeIn, scopeOut):
+        """ Add the zip archives to the output file lists """
+
+        # add all input files to output lists (so that metadata will be create - must be removed again before stage-out)
+        i = 0
+        for inFile in inFiles:
+            outFiles.append(inFile)
+            destinationDblock.append(dispatchDblock[i])
+            destinationDBlockToken.append(dispatchDBlockToken[i])
+            scopeOut.append(scopeIn[i])
+            i += 1
+
+        for archive in zip_map.keys():
+            # do not add the archive if it is already listed as an output file
+            if archive not in outFiles:
+                content_files = zip_map[archive]
+                pUtil.tolog('Processing files from archive %s: %s' % (archive, str(content_files)))
+
+                # Find the corresponding destinationDblock, destinationDBlockToken, scopeOut for the content_files
+                # so we can use them for the archive itself
+                found = False
+                for inFile in inFiles:
+                    if content_files[0] == inFile: # assume same info for all input files in this archive, use first file
+                        found = True
+                        break
+                if found:
+                    archiveDestinationDblock = dispatchDblock[0]
+                    archiveDestinationDBlockToken = dispatchDBlockToken[0]
+                    archiveScopeOut = scopeIn[0]
+                else:
+                    pUtil.tolog("!!WARNING!!3434!! Did not find zip content file among output files")
+                    archiveDestinationDblock = "UNKNOWN"
+                    archiveDestinationDBlockToken = "UNKNOWN"
+                    archiveScopeOut = "UNKNOWN"
+
+                outFiles.append(archive)
+                destinationDblock.append(archiveDestinationDblock)
+                destinationDBlockToken.append(archiveDestinationDBlockToken)
+                scopeOut.append(archiveScopeOut)
+            else:
+                pUtil.tolog('Archive %s is already listed as an output file' % archive)
+
+        return outFiles, destinationDblock, destinationDBlockToken, scopeOut
+
+    def addArchivesToOutputOld(self, zip_map, outFiles, destinationDblock, destinationDBlockToken, scopeOut):
         """ Add the zip archives to the output file lists """
 
         for archive in zip_map.keys():
             content_files = zip_map[archive]
+            pUtil.tolog('Processing files from archive %s: %s' % (archive, str(content_files)))
 
             # Find the corresponding destinationDblock, destinationDBlockToken, scopeOut for the content_files
             # so we can use them for the archive itself
@@ -857,7 +926,7 @@ class Job:
                 archiveDestinationDBlockToken = destinationDBlockToken[i]
                 archiveScopeOut = scopeOut[i]
             else:
-                tolog("!!WARNING!!3434!! Did not find zip content file among output files")
+                pUtil.tolog("!!WARNING!!3434!! Did not find zip content file among output files")
                 archiveDestinationDblock = "UNKNOWN"
                 archiveDestinationDBlockToken = "UNKNOWN"
                 archiveScopeOut = "UNKNOWN"
@@ -1157,7 +1226,7 @@ class FileSpec(object):
 
     _os_keys = ['eventRangeId', 'storageId', 'eventService', 'allowAllInputRSEs', 'pandaProxySecretKey', 'jobId', 'osPrivateKey', 'osPublicKey', 'pathConvention', 'taskId']
 
-    _local_keys = ['type', 'status', 'replicas', 'surl', 'turl', 'mtime', 'status_code']
+    _local_keys = ['type', 'status', 'replicas', 'surl', 'turl', 'mtime', 'status_code', 'retries']
 
     def __init__(self, **kwargs):
 
@@ -1166,6 +1235,7 @@ class FileSpec(object):
             setattr(self, k, kwargs.get(k, getattr(self, k, None)))
 
         self.filesize = int(getattr(self, 'filesize', 0) or 0)
+        self.retries = 0
         if self.eventService is None:
             self.eventService = False
         self.allowAllInputRSEs = False
@@ -1224,7 +1294,7 @@ class FileSpec(object):
 
         if ensure_replica:
 
-            allowed_replica_schemas = ['root://', 'dcache://', 'dcap://', 'file://']
+            allowed_replica_schemas = ['root://', 'davs://', 'dcache://', 'dcap://', 'file://', 'https://']
 
             if self.turl:
                 if True not in set([self.turl.startswith(e) for e in allowed_replica_schemas]):
